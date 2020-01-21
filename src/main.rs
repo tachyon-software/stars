@@ -126,7 +126,6 @@ impl EventHandler for Handler {
             } else {
                 match WatchedMessage::new(&context, &reaction, &reaction_kind) {
                     Ok(message) => {
-                        dbg!(&message);
                         write_lock.insert(reaction.message_id, message);
                     }
                     Err(err) => eprintln!("Error creating WatchedMessage: {}", err),
