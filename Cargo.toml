@@ -1,0 +1,12 @@
+[package]
+name = "stars"
+version = "0.1.0"
+authors = ["Haze Booth <isnt@haze.cool>"]
+edition = "2018"
+
+[dependencies]
+serenity = { git = "https://github.com/serenity-rs/serenity", branch = "current" }
+dotenv = "0.15.0"
+
+[profile.release]
+codegen-units = 1
