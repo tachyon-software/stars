@@ -7,6 +7,7 @@ edition = "2018"
 [dependencies]
 serenity = { git = "https://github.com/serenity-rs/serenity", branch = "current" }
 dotenv = "0.15.0"
+chrono = "0.4.10"
 
 [profile.release]
 codegen-units = 1

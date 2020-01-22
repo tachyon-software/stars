@@ -13,6 +13,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use chrono::prelude::*;
+use chrono::{offset::Utc, DateTime};
+
 #[derive(Debug)]
 struct WatchedMessage {
     star_count: usize,
@@ -26,6 +29,13 @@ impl WatchedMessage {
 
     fn is_ready_for_pinning(&self) -> bool {
         self.star_count >= 10
+    }
+
+    fn url(&self) -> String {
+        format!(
+            "https://discordapp.com/channels/{}/{}",
+            self.message.channel_id, self.message.id
+        )
     }
 
     fn new(
@@ -65,6 +75,7 @@ impl Handler {
         let star_id = star_id.into();
         let starboard_channel = starboard_channel.into();
         let instantiation_time = Instant::now();
+
         Handler {
             watched_messages,
             admin_star_id,
@@ -79,21 +90,50 @@ impl Handler {
         ctx: &Context,
         watched_message: &WatchedMessage,
     ) -> Result<(), String> {
+        let star_time: DateTime<Utc> = Utc::now();
         let author = watched_message
             .message
             .author_nick(ctx)
             .unwrap_or_else(|| watched_message.message.author.name.clone());
-        return self
-            .starboard_channel
+        self.starboard_channel
             .send_message(&ctx.http, |m| {
                 m.embed(|e| {
-                    e.title(author);
-                    e.description(&watched_message.message.content);
+                    let has_message = !&watched_message.message.content.is_empty();
+                    if has_message {
+                        e.description(&watched_message.message.content);
+                    }
+                    let attachments = &watched_message.message.attachments;
+                    if attachments.len() == 1 {
+                        if has_message {
+                            e.thumbnail(attachments.get(0).unwrap().url.clone());
+                        } else {
+                            e.image(attachments.get(0).unwrap().url.clone());
+                        }
+                    } else if attachments.len() > 1 {
+                        let mut attachments_str = attachments.iter().fold(
+                            String::with_capacity(77 * attachments.len()),
+                            |mut acc, a| {
+                                acc.push_str(&*a.url);
+                                acc.push('\n');
+                                acc
+                            },
+                        );
+                        attachments_str.pop();
+                        e.description(attachments_str);
+                    }
+                    e.color(0xFFCC36);
+                    e.author(|a| {
+                        a.name(author);
+                        a.url(watched_message.url());
+                        a.icon_url(watched_message.message.author.face());
+                        a
+                    });
+                    e.timestamp(&star_time);
                     e
                 })
             })
             .map_err(|err| format!("Could not send message to star board: {}", err))
-            .map(|_| ());
+            .map(|_| ())
     }
 
     fn is_valid_reaction(&self, reaction: &Reaction) -> Option<ReactionKind> {
@@ -115,6 +155,7 @@ impl Handler {
 
 impl EventHandler for Handler {
     fn reaction_add(&self, context: Context, reaction: Reaction) {
+        dbg!(&reaction);
         let reaction_kind = self.is_valid_reaction(&reaction);
         if reaction_kind.is_none() {
             return;
