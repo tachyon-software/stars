@@ -2,9 +2,10 @@ use dotenv::dotenv;
 use serenity::{
     client::Client,
     model::{
-        channel::{Message, Reaction, ReactionType},
+        channel::{Channel, Message, Reaction, ReactionType},
         gateway::Ready,
-        id::{ChannelId, EmojiId, MessageId},
+        id::{ChannelId, EmojiId, GuildId, MessageId},
+        permissions::Permissions,
     },
     prelude::{Context, EventHandler},
 };
@@ -13,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use chrono::prelude::*;
 use chrono::{offset::Utc, DateTime};
 
 #[derive(Debug)]
@@ -23,18 +23,22 @@ struct WatchedMessage {
 }
 
 impl WatchedMessage {
-    fn on_star_added(&mut self) {
-        self.star_count += 1;
+    fn on_star_added(&mut self, reaction_kind: &ReactionKind) {
+        self.star_count += reaction_kind.power();
+    }
+
+    fn on_star_removed(&mut self, reaction_kind: &ReactionKind) {
+        self.star_count -= reaction_kind.power();
     }
 
     fn is_ready_for_pinning(&self) -> bool {
         self.star_count >= 10
     }
 
-    fn url(&self) -> String {
+    fn url(&self, guild_id: &GuildId) -> String {
         format!(
-            "https://discordapp.com/channels/{}/{}",
-            self.message.channel_id, self.message.id
+            "https://discordapp.com/channels/{}/{}/{}",
+            guild_id, self.message.channel_id, self.message.id
         )
     }
 
@@ -61,11 +65,21 @@ struct Handler {
     star_id: EmojiId,
     instantiation_time: Instant,
     starboard_channel: ChannelId,
+    starred_message_ids: Arc<RwLock<Vec<MessageId>>>,
 }
 
 enum ReactionKind {
     AdminStar,
     UserStar,
+}
+
+impl ReactionKind {
+    fn power(&self) -> usize {
+        match self {
+            ReactionKind::AdminStar => 10,
+            ReactionKind::UserStar => 1,
+        }
+    }
 }
 
 impl Handler {
@@ -75,6 +89,7 @@ impl Handler {
         let star_id = star_id.into();
         let starboard_channel = starboard_channel.into();
         let instantiation_time = Instant::now();
+        let starred_message_ids = Arc::new(RwLock::new(Vec::with_capacity(32)));
 
         Handler {
             watched_messages,
@@ -82,12 +97,14 @@ impl Handler {
             star_id,
             instantiation_time,
             starboard_channel,
+            starred_message_ids,
         }
     }
 
     fn add_message_to_starboard(
         &self,
         ctx: &Context,
+        guild_id: &GuildId,
         watched_message: &WatchedMessage,
     ) -> Result<(), String> {
         let star_time: DateTime<Utc> = Utc::now();
@@ -111,6 +128,7 @@ impl Handler {
                         }
                     } else if attachments.len() > 1 {
                         let mut attachments_str = attachments.iter().fold(
+                            // discord url length is ~ 77 characters
                             String::with_capacity(77 * attachments.len()),
                             |mut acc, a| {
                                 acc.push_str(&*a.url);
@@ -124,7 +142,7 @@ impl Handler {
                     e.color(0xFFCC36);
                     e.author(|a| {
                         a.name(author);
-                        a.url(watched_message.url());
+                        a.url(watched_message.url(&guild_id));
                         a.icon_url(watched_message.message.author.face());
                         a
                     });
@@ -154,16 +172,65 @@ impl Handler {
 }
 
 impl EventHandler for Handler {
-    fn reaction_add(&self, context: Context, reaction: Reaction) {
-        dbg!(&reaction);
+    fn reaction_remove(&self, _context: Context, reaction: Reaction) {
         let reaction_kind = self.is_valid_reaction(&reaction);
         if reaction_kind.is_none() {
             return;
         }
         let reaction_kind = reaction_kind.unwrap();
+        // if we haven't seen this before
+        if let Ok(read_lock) = self.starred_message_ids.read() {
+            if read_lock.contains(&reaction.message_id) {
+                return;
+            }
+        }
         if let Ok(mut write_lock) = self.watched_messages.write() {
             if let Some(ref mut watched_message) = write_lock.get_mut(&reaction.message_id) {
-                watched_message.on_star_added();
+                watched_message.on_star_removed(&reaction_kind);
+            }
+        }
+    }
+    fn reaction_add(&self, context: Context, reaction: Reaction) {
+        let reaction_kind = self.is_valid_reaction(&reaction);
+        if reaction_kind.is_none() {
+            return;
+        }
+
+        let reaction_kind = reaction_kind.unwrap();
+        let guild_id;
+
+        // --- short circuiting ---
+        match reaction.channel(&context) {
+            Ok(Channel::Guild(channel)) => {
+                guild_id = Some(channel.read().guild_id);
+                match reaction_kind {
+                    ReactionKind::AdminStar => {
+                        if let Ok(perms) = guild_id
+                            .unwrap()
+                            .member(&context, reaction.user_id)
+                            .and_then(|m| m.permissions(&context))
+                        {
+                            if !perms.contains(Permissions::ADMINISTRATOR) {
+                                return;
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => return, // unsupported
+        }
+
+        // if we haven't seen this before
+        if let Ok(read_lock) = self.starred_message_ids.read() {
+            if read_lock.contains(&reaction.message_id) {
+                return;
+            }
+        }
+
+        if let Ok(mut write_lock) = self.watched_messages.write() {
+            if let Some(ref mut watched_message) = write_lock.get_mut(&reaction.message_id) {
+                watched_message.on_star_added(&reaction_kind);
             } else {
                 match WatchedMessage::new(&context, &reaction, &reaction_kind) {
                     Ok(message) => {
@@ -175,9 +242,11 @@ impl EventHandler for Handler {
         }
         let mut to_delete = None;
         if let Ok(read_lock) = self.watched_messages.read() {
-            if let Some(watched_message) = read_lock.get(&reaction.message_id) {
+            if let (Some(watched_message), Some(ref guild_id)) =
+                (read_lock.get(&reaction.message_id), guild_id)
+            {
                 if watched_message.is_ready_for_pinning() {
-                    match self.add_message_to_starboard(&context, watched_message) {
+                    match self.add_message_to_starboard(&context, guild_id, watched_message) {
                         Ok(_) => to_delete = Some(watched_message.message.id),
                         Err(err) => match reaction
                             .channel_id
@@ -193,17 +262,32 @@ impl EventHandler for Handler {
         if let Some(msg_id) = to_delete {
             if let Ok(mut write_lock) = self.watched_messages.write() {
                 write_lock.remove(&msg_id);
+                if let Ok(mut starred_write_lock) = self.starred_message_ids.write() {
+                    starred_write_lock.push(msg_id);
+                }
             }
         }
     }
 
-    fn ready(&self, _context: Context, _data_about_bot: Ready) {
+    fn ready(&self, context: Context, about_bot: Ready) {
         println!(
-            "Bot ready after {}ms",
+            "Bot ready after {}ms, gathering starred messages...",
             Instant::now()
                 .duration_since(self.instantiation_time)
                 .as_millis()
         );
+        if let (Ok(mut write_lock), Ok(messages)) = (
+            self.starred_message_ids.write(),
+            self.starboard_channel
+                .messages(&context.http, |m| m.limit(100)),
+        ) {
+            for message in messages {
+                if message.author.id == about_bot.user.id {
+                    write_lock.push(message.id);
+                }
+            }
+            println!("Gathered {} already starred messages", write_lock.len());
+        }
     }
 }
 
