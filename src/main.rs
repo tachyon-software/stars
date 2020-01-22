@@ -210,7 +210,11 @@ impl EventHandler for Handler {
                             .member(&context, reaction.user_id)
                             .and_then(|m| m.permissions(&context))
                         {
-                            if !perms.contains(Permissions::ADMINISTRATOR) {
+                            if !perms.contains(Permissions::MANAGE_GUILD) {
+                                eprintln!(
+                                    "User {} does not have permissions to use admin star!",
+                                    reaction.user_id
+                                );
                                 return;
                             };
                         }
@@ -224,6 +228,7 @@ impl EventHandler for Handler {
         // if we haven't seen this before
         if let Ok(read_lock) = self.starred_message_ids.read() {
             if read_lock.contains(&reaction.message_id) {
+                eprintln!("I've already seen message: {}", &reaction.message_id);
                 return;
             }
         }
