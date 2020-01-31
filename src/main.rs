@@ -10,7 +10,7 @@ use serenity::{
     prelude::{Context, EventHandler},
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -32,7 +32,7 @@ impl WatchedMessage {
     }
 
     fn is_ready_for_pinning(&self) -> bool {
-        self.star_count >= 10
+        self.star_count >= 5
     }
 
     fn url(&self, guild_id: &GuildId) -> String {
@@ -48,10 +48,7 @@ impl WatchedMessage {
         kind: &ReactionKind,
     ) -> Result<WatchedMessage, String> {
         Ok(WatchedMessage {
-            star_count: match kind {
-                ReactionKind::AdminStar => 10,
-                ReactionKind::UserStar => 0,
-            },
+            star_count: kind.power(),
             message: reaction
                 .message(&context.http)
                 .map_err(|err| format!("Could not retrieve message: {}", err))?,
@@ -62,10 +59,9 @@ impl WatchedMessage {
 struct Handler {
     watched_messages: Arc<RwLock<HashMap<MessageId, WatchedMessage>>>,
     admin_star_id: EmojiId,
-    star_id: EmojiId,
     instantiation_time: Instant,
     starboard_channel: ChannelId,
-    starred_message_ids: Arc<RwLock<Vec<MessageId>>>,
+    starred_message_ids: Arc<RwLock<HashSet<MessageId>>>,
 }
 
 enum ReactionKind {
@@ -76,25 +72,23 @@ enum ReactionKind {
 impl ReactionKind {
     fn power(&self) -> usize {
         match self {
-            ReactionKind::AdminStar => 10,
+            ReactionKind::AdminStar => 5,
             ReactionKind::UserStar => 1,
         }
     }
 }
 
 impl Handler {
-    fn new(admin_star_id: u64, star_id: u64, starboard_channel: u64) -> Handler {
+    fn new(admin_star_id: u64, starboard_channel: u64) -> Handler {
         let watched_messages = Arc::new(RwLock::new(HashMap::with_capacity(32)));
         let admin_star_id = admin_star_id.into();
-        let star_id = star_id.into();
         let starboard_channel = starboard_channel.into();
         let instantiation_time = Instant::now();
-        let starred_message_ids = Arc::new(RwLock::new(Vec::with_capacity(32)));
+        let starred_message_ids = Arc::new(RwLock::new(HashSet::with_capacity(32)));
 
         Handler {
             watched_messages,
             admin_star_id,
-            star_id,
             instantiation_time,
             starboard_channel,
             starred_message_ids,
@@ -163,7 +157,9 @@ impl Handler {
         {
             if id == self.admin_star_id {
                 return Some(ReactionKind::AdminStar);
-            } else if id == self.star_id {
+            }
+        } else if let ReactionType::Unicode(ref id) = reaction.emoji {
+            if id == "⭐" {
                 return Some(ReactionKind::UserStar);
             }
         }
@@ -268,7 +264,7 @@ impl EventHandler for Handler {
             if let Ok(mut write_lock) = self.watched_messages.write() {
                 write_lock.remove(&msg_id);
                 if let Ok(mut starred_write_lock) = self.starred_message_ids.write() {
-                    starred_write_lock.push(msg_id);
+                    starred_write_lock.insert(msg_id);
                 }
             }
         }
@@ -288,7 +284,7 @@ impl EventHandler for Handler {
         ) {
             for message in messages {
                 if message.author.id == about_bot.user.id {
-                    write_lock.push(message.id);
+                    write_lock.insert(message.id);
                 }
             }
             println!("Gathered {} already starred messages", write_lock.len());
@@ -308,10 +304,6 @@ fn main() -> Result<(), String> {
                 .map_err(|err| format!("Error getting admin emoji star id: {}", err))?
                 .parse::<u64>()
                 .map_err(|err| format!("Error parsing admin emoji star id as u64: {}", err))?,
-            std::env::var("STAR_EMOJI_ID")
-                .map_err(|err| format!("Error getting emoji star id: {}", err))?
-                .parse::<u64>()
-                .map_err(|err| format!("Error parsing emoji star id as u64: {}", err))?,
             std::env::var("STARBOARD_CHANNEL_ID")
                 .map_err(|err| format!("Error getting starboard channel id: {}", err))?
                 .parse::<u64>()
