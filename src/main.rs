@@ -78,6 +78,10 @@ impl ReactionKind {
     }
 }
 
+fn does_url_represent_a_video(url: &str) -> bool {
+    url.ends_with(".mov") || url.ends_with(".mp4")
+}
+
 impl Handler {
     fn new(admin_star_id: u64, starboard_channel: u64) -> Handler {
         let watched_messages = Arc::new(RwLock::new(HashMap::with_capacity(32)));
@@ -109,16 +113,23 @@ impl Handler {
         self.starboard_channel
             .send_message(&ctx.http, |m| {
                 m.embed(|e| {
+                    let mut description = String::new();
                     let has_message = !&watched_message.message.content.is_empty();
                     if has_message {
-                        e.description(&watched_message.message.content);
+                        description.push_str(&watched_message.message.content);
+                        description.push('\n');
                     }
                     let attachments = &watched_message.message.attachments;
                     if attachments.len() == 1 {
-                        if has_message {
-                            e.thumbnail(attachments.get(0).unwrap().url.clone());
+                        let url = attachments.get(0).unwrap().url.clone();
+                        if does_url_represent_a_video(&*url) {
+                            description.push_str(&url);
                         } else {
-                            e.image(attachments.get(0).unwrap().url.clone());
+                            if has_message {
+                                e.thumbnail(url);
+                            } else {
+                                e.image(url);
+                            }
                         }
                     } else if attachments.len() > 1 {
                         let mut attachments_str = attachments.iter().fold(
@@ -131,8 +142,9 @@ impl Handler {
                             },
                         );
                         attachments_str.pop();
-                        e.description(attachments_str);
+                        description = attachments_str
                     }
+                    e.description(description);
                     e.color(0xFFCC36);
                     e.author(|a| {
                         a.name(author);
